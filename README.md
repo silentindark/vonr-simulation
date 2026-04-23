@@ -501,3 +501,5 @@ vonr-simulation/
 - [Kamailio IMS](https://www.kamailio.org/wiki/)
 - [docker_open5gs](https://github.com/herlesupreeth/docker_open5gs) by herlesupreeth
 - [pyHSS](https://github.com/nickvsnetworking/pyhss) by nickvsnetworking
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed diagrams.
