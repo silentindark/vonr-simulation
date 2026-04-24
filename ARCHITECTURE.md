@@ -181,26 +181,3 @@ graph TB
     SCSCF2 --> RTPE2
     UEC --> PCSCF2
 ```
-
----
-
-## Measured Performance
-
-```mermaid
-xychart-beta
-    title "RTP Stream Quality Metrics"
-    x-axis ["Min Jitter", "Mean Jitter", "Max Jitter"]
-    y-axis "Milliseconds (ms)" 0 --> 50
-    bar [0.59, 9.20, 10.52]
-    line [0.59, 9.20, 10.52]
-```
-
-| Metric | Measured | 3GPP Limit | Status |
-|--------|----------|------------|--------|
-| Packet Loss | 0.0% | < 1% | ✅ Pass |
-| Mean Jitter | 9.2 ms | < 50 ms | ✅ Pass |
-| Max Jitter | 10.5 ms | < 50 ms | ✅ Pass |
-| MOS Score | 3.58 | > 3.5 | ✅ Pass |
-| Registration | 318 ms | < 500 ms | ✅ Pass |
-| Teardown | 10 ms | < 500 ms | ✅ Pass |
-| Codec | Opus | AMR-WB | ✅ Good |
