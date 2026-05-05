@@ -1,505 +1,585 @@
-# VoNR Simulation Stack
+# VoNR Demo using Open5GS
+### End-to-End Voice over New Radio Simulation
+**IIT Hyderabad — TWiN Project | Sudharshan Mothukuru (RP1141) | 2026**
 
-> **Voice over New Radio (VoNR)** — fully software-simulated end-to-end 5G voice call stack running on a single Ubuntu machine. No physical hardware required.
+> **What this is:** A complete, working VoNR (Voice over 5G New Radio) simulation on a single Ubuntu machine. Two software phones make a real voice call over a fully simulated 5G Standalone network with IMS — no hardware, no SIM cards, no spectrum license.
+
+---
+
+## Quick Start (TL;DR)
+
+```bash
+./start_vonr.sh          # start everything (~3 min)
+./vonr_call.sh           # make a VoNR call
+./vonr_full_kpi_logs.sh  # measure call quality KPIs
+./verify_vonr_complete.sh # verify 55 checks pass
+./stop_vonr.sh           # stop before shutdown
+```
 
 ---
 
 ## Table of Contents
 
-- [Overview](#overview)
+- [Verified Results](#verified-results)
 - [Architecture](#architecture)
-- [Stack Components](#stack-components)
+- [Deviations from Original Proposal](#deviations-from-original-proposal)
 - [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [Detailed Setup](#detailed-setup)
-  - [1. System Preparation](#1-system-preparation)
-  - [2. Clone and Configure](#2-clone-and-configure)
-  - [3. Critical Pre-fixes](#3-critical-pre-fixes)
-  - [4. Build and Deploy](#4-build-and-deploy)
-  - [5. Subscriber Provisioning](#5-subscriber-provisioning)
-  - [6. Start the RAN](#6-start-the-ran)
-  - [7. IMS Registration and Call](#7-ims-registration-and-call)
-- [Measured Results](#measured-results)
-- [QoS and QFI Handling](#qos-and-qfi-handling)
-- [Known Issues and Fixes](#known-issues-and-fixes)
-- [Hardware Transition Plan](#hardware-transition-plan)
-- [Repository Structure](#repository-structure)
+- [Step 1 — Install Dependencies](#step-1--install-dependencies)
+- [Step 2 — Clone and Configure](#step-2--clone-and-configure)
+- [Step 3 — Start the Stack](#step-3--start-the-stack)
+- [Step 4 — Make a VoNR Call](#step-4--make-a-vonr-call)
+- [Step 5 — Full KPI Measurement](#step-5--full-kpi-measurement)
+- [Step 6 — Verify Everything](#step-6--verify-everything)
+- [Step 7 — Stop Before Shutdown](#step-7--stop-before-shutdown)
+- [Critical Bugs Fixed](#critical-bugs-fixed)
+- [Troubleshooting](#troubleshooting)
+- [Scripts Reference](#scripts-reference)
+- [Subscriber Configuration](#subscriber-configuration)
+- [References](#references)
 
 ---
 
-## Overview
+## Verified Results
 
-This repository implements a complete **VoNR (Voice over New Radio)** testbed using open-source components. VoNR is the 5G equivalent of VoLTE — voice calls delivered natively over 5G New Radio using IMS (IP Multimedia Subsystem).
+All results from live capture on May 5, 2026 — `vonr.pcap` (20-second call, Opus codec, ZMQ simulation).
 
-The setup uses **ZMQ-based RF simulation** via srsRAN, which provides a realistic L1/L2/L3 protocol stack without any physical radio hardware or SDR devices.
+### Call Quality (RTP)
 
-**What is demonstrated:**
-- 5G SA (Standalone) UE registration via srsRAN + Open5GS
-- IMS registration flow: P-CSCF → I-CSCF → S-CSCF → pyHSS (Diameter Cx)
-- End-to-end VoNR call: INVITE → Ringing → Connected → Media (RTP/Opus) → BYE
-- Separate QoS flows: IMS (QFI=1, GBR) vs Internet (QFI=9, non-GBR)
-- Captured and analyzed RTP metrics: 0% packet loss, 9.2ms jitter, MOS 3.58
+| Metric | Stream 1 (UE→RTPEngine) | Stream 2 (RTPEngine→UE) | 3GPP Limit | Status |
+|--------|------------------------|------------------------|------------|--------|
+| Packets | 978 | 978 | — | ✅ |
+| Packet Loss | **0.0%** | **0.0%** | < 1% | ✅ Pass |
+| Mean Delta | **19.988ms** | **19.988ms** | ~20ms (50pps) | ✅ Pass |
+| Mean Jitter | **9.912ms** | **9.910ms** | < 50ms | ✅ Pass |
+| Max Jitter | **10.604ms** | **10.601ms** | < 50ms | ✅ Pass |
+| Codec | **Opus** | **Opus** | — | ✅ |
+
+### Call Timing
+
+| Metric | Measured |
+|--------|----------|
+| Call Setup Time (INVITE → 200 OK) | **0.061 seconds** |
+| Call Duration | **19.877 seconds** |
+| IMS Registration Latency | **~318ms** |
+
+### Verification
+
+```
+Total checks : 55
+Passed       : 55
+Failed       : 0
+Warnings     : 0
+VoNR stack is fully operational!
+```
+
+### SIP Call Flow (from pcap)
+
+```
+0.44s    →  200 OK  (initial registration)
+20.00s   →  REGISTER
+20.19s   ←  401 Unauthorized (challenge)
+20.42s   →  REGISTER (with credentials)
+          ←  200 OK (registered)
+24.87s   →  INVITE  (UE1 calls UE2)
+24.94s   ←  180 Ringing
+24.94s   ←  200 OK  (UE2 answers)
+25.16s   →  ACK
+25.21s      RTP audio flows (Opus, 50 pps)
+44.75s   →  BYE
+44.76s   ←  200 OK  (call ended cleanly)
+```
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Single Ubuntu Host                        │
-│                                                             │
-│  ┌──────────────┐   ZMQ   ┌──────────────┐   N2/N3         │
-│  │  srsRAN UE   │◄───────►│  srsRAN gNB  │◄──────────┐     │
-│  │  (5G SA)     │         │  (5G NR)     │           │     │
-│  └──────┬───────┘         └──────────────┘           │     │
-│         │ tun_srsue                         ┌─────────▼───┐ │
-│         │ 192.168.101.2                     │  Open5GS    │ │
-│         │ (IMS APN)                         │  5G Core    │ │
-│         │                                   │  AMF/SMF    │ │
-│  ┌──────▼───────┐                           │  UPF/NRF    │ │
-│  │  linphonec   │◄── SIP ──────────────────►│  UDM/UDR    │ │
-│  │  UE1 (5070)  │                           │  AUSF/PCF   │ │
-│  │  UE2 (5071)  │         ┌─────────────────┴─────────────┘ │
-│  └──────────────┘         │                                  │
-│         │ RTP             │  ┌─────────────────────────────┐ │
-│         └─────────────────┼─►│     Kamailio IMS            │ │
-│                           │  │  P-CSCF → I-CSCF → S-CSCF  │ │
-│                           │  └──────────────┬──────────────┘ │
-│                           │                 │ Diameter Cx     │
-│                           │  ┌──────────────▼──────────────┐ │
-│                           │  │  pyHSS + MySQL + RTPEngine  │ │
-│                           │  └─────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Single Ubuntu Host                           │
+│                                                                     │
+│  ┌─────────────┐   ZMQ    ┌─────────────┐   N2/N3  ┌───────────┐  │
+│  │  srsRAN UE  │◄────────►│ srsRAN gNB  │◄────────►│  Open5GS  │  │
+│  │ linphonec   │          │ (ZMQ RF sim)│          │  5G Core  │  │
+│  │ UE1: :5070  │          │ 172.22.0.37 │          │ AMF / SMF │  │
+│  │ UE2: :5071  │          └─────────────┘          │ UPF / NRF │  │
+│  │ 172.22.0.34 │                                   └─────┬─────┘  │
+│  └──────┬──────┘                                         │         │
+│         │ SIP over IMS APN                       ogstun2 │         │
+│         │ 192.168.101.2                    192.168.101.1 │         │
+│         ▼                                                │         │
+│  ┌─────────────────────────────────┐                    │         │
+│  │  Kamailio IMS  (172.22.0.x)     │◄───────────────────┘         │
+│  │  P-CSCF :5060  →  I-CSCF :4060 │                              │
+│  │  I-CSCF        →  S-CSCF :6060 │                              │
+│  └──────┬──────────────┬───────────┘                              │
+│         │ Diameter Cx  │ RTP relay                                 │
+│         ▼              ▼                                           │
+│  ┌──────────┐   ┌─────────────┐                                   │
+│  │  pyHSS   │   │  RTPEngine  │  ← relays Opus audio packets      │
+│  │  MySQL   │   │ 172.22.0.16 │                                   │
+│  └──────────┘   └─────────────┘                                   │
+│                                                                     │
+│  Docker Network: 172.22.0.0/24    26 containers total              │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-**SIP Call Flow:**
-```
-UE1 → P-CSCF → I-CSCF → S-CSCF → pyHSS (UAR/SAR via Diameter)
-                                ↓
-UE2 ← P-CSCF ← I-CSCF ← S-CSCF
-         ↕ RTPEngine ↕
-      (RTP audio media)
-```
+**Three-phase call flow:**
+
+1. **5G Registration** — srsUE attaches to gNB (ZMQ) → AMF authenticates via 5G-AKA → SMF creates IMS PDU session → UE gets IP `192.168.101.2` on `ogstun2`
+2. **IMS Registration** — linphonec sends `SIP REGISTER` → P-CSCF → I-CSCF queries pyHSS via Diameter UAR → S-CSCF challenges with 401 → UE responds with credentials → `200 OK`
+3. **VoNR Call** — `SIP INVITE` → `180 Ringing` → `200 OK` → `ACK` → RTP audio (Opus, 50 pps, 20ms intervals) relayed via RTPEngine → `SIP BYE` → `200 OK`
 
 ---
 
-## Stack Components
+## Deviations from Original Proposal
 
-| Layer | Component | Version | Role |
-|---|---|---|---|
-| 5G RAN (gNB) | srsRAN Project | commit 11c9bba | 5G NR base station (ZMQ transport) |
-| 5G RAN (UE) | srsRAN 4G | commit ec29b0c | 5G SA UE (ZMQ transport) |
-| 5G Core | Open5GS | latest | AMF, SMF, UPF, NRF, UDM, UDR, AUSF, PCF, NSSF, BSF |
-| IMS P-CSCF | Kamailio | 5.2.4+ | Proxy-CSCF (UE entry point for SIP) |
-| IMS I-CSCF | Kamailio | 5.2.4+ | Interrogating-CSCF (HSS query) |
-| IMS S-CSCF | Kamailio | 5.2.4+ | Serving-CSCF (authentication, routing) |
-| IMS HSS | pyHSS | latest | Home Subscriber Server (Diameter Cx/Sh) |
-| Media Relay | RTPEngine | mr7.4.1.5 | RTP media relay and transcoding |
-| SIP Client | linphonec | 4.4.21 | Software phone (UE simulator) |
-| Database | MySQL | 8.0 | IMS subscriber database |
-| Database | MongoDB | 6.0 | Open5GS subscriber database |
+> Two tools were changed from the original proposal. Both are upgrades, not failures.
+
+| Original Plan | What Was Used | Why |
+|---|---|---|
+| **UERANSIM** | **srsRAN (ZMQ)** | srsRAN simulates full L1/L2/L3 stack (HARQ, MAC, RLC, PDCP) — more realistic protocol behavior |
+| **RTPProxy** | **RTPEngine** | RTPEngine is actively maintained and already integrated in docker_open5gs |
+| **Wireshark** | **tshark + tcpdump** | Same libpcap engine, works headless in Docker; tshark gives scriptable KPI extraction |
 
 ---
 
 ## Prerequisites
 
-### Hardware
-| Resource | Minimum | Recommended |
-|---|---|---|
-| CPU | 8 cores | 16 cores |
-| RAM | 16 GB | 32 GB |
-| Storage | 100 GB SSD | 200 GB SSD |
-| OS | Ubuntu 22.04 | Ubuntu 22.04 LTS |
-
-### Software
-```bash
-# Docker Engine
-sudo apt-get install -y docker.io
-sudo systemctl enable --now docker
-sudo usermod -aG docker $USER && newgrp docker
-
-# Docker Compose V2 (manual install - apt package unavailable on Ubuntu 24.04)
-DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
-mkdir -p $DOCKER_CONFIG/cli-plugins
-curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker-compose-linux-x86_64 \
-  -o $DOCKER_CONFIG/cli-plugins/docker-compose
-chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
-
-# Verify
-docker compose version   # Must be v2.x — NOT docker-compose (v1)
-
-# Analysis tools
-sudo apt-get install -y tshark
-```
-
-> ⚠️ **Important:** Use `docker compose` (V2 plugin), NOT `docker-compose` (V1). They are different tools.
+- **OS:** Ubuntu 22.04 LTS (tested), Ubuntu 20.04 works
+- **Hardware:** 8-core CPU, 16GB RAM, 50GB disk
+- **Network:** Internet for initial setup only
 
 ---
 
-## Quick Start
+## Step 1 — Install Dependencies
 
 ```bash
-# Clone
-git clone https://github.com/sudharshan1916/vonr-simulation
-cd vonr-simulation
+# Docker
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y docker.io docker-compose-plugin
+sudo usermod -aG docker $USER
+newgrp docker
 
-# Deploy full stack
-bash scripts/deploy.sh
+# Verify Docker Compose V2 (must be v2.x)
+docker compose version
 
-# Make a VoNR call
-bash scripts/call_test.sh
-```
+# Network tools
+sudo apt install -y tshark tcpdump net-tools linphone-cli
 
----
+# Allow tcpdump without password (needed for RTP capture scripts)
+echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/tcpdump" | sudo tee /etc/sudoers.d/tcpdump
+sudo chmod 440 /etc/sudoers.d/tcpdump
 
-## Detailed Setup
-
-### 1. System Preparation
-
-```bash
-# Enable IP forwarding
+# Enable IP forwarding permanently
 sudo sysctl -w net.ipv4.ip_forward=1
-sudo sysctl -w net.ipv4.conf.all.forwarding=1
-
-# Disable firewall (interferes with Docker networking)
-sudo ufw disable
-
-# Fix Docker DNS (critical for campus/restricted networks)
-# Find real DNS:
-resolvectl status | grep "Current DNS Server"
-# Then configure:
-echo '{"dns": ["YOUR_DNS_IP", "8.8.8.8"]}' | sudo tee /etc/docker/daemon.json
-sudo systemctl restart docker
-
-# Stop native Open5GS if installed (causes port conflicts on 9090)
-sudo systemctl stop open5gs-* 2>/dev/null
-sudo systemctl disable open5gs-* 2>/dev/null
+echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
 ```
 
-### 2. Clone and Configure
+---
+
+## Step 2 — Clone and Configure
 
 ```bash
-git clone https://github.com/herlesupreeth/docker_open5gs
+# Clone the base stack
+git clone https://github.com/herlesupreeth/docker_open5gs.git
 cd docker_open5gs
 
-# Find your host IP
-ip route get 8.8.8.8 | awk '{print $7; exit}'
-
-# Edit .env — only change these three values
-sed -i 's/DOCKER_HOST_IP=.*/DOCKER_HOST_IP=YOUR_HOST_IP/' .env
-sed -i 's/SGWU_ADVERTISE_IP=.*/SGWU_ADVERTISE_IP=YOUR_HOST_IP/' .env
-sed -i 's/UPF_ADVERTISE_IP=.*/UPF_ADVERTISE_IP=YOUR_HOST_IP/' .env
-```
-
-> ⚠️ Do NOT change any container IP addresses in `.env` — leave all `172.22.0.X` values at their defaults.
-
-### 3. Critical Pre-fixes
-
-Apply these **before** deploying. Skipping causes hard-to-debug failures.
-
-```bash
-# Fix 1: Disable N5 QoS in P-CSCF (prevents 412 registration errors)
+# CRITICAL FIX — disable N5 QoS before first build
+# Without this, SIP REGISTER returns 412 error
 sed -i '/WITH_N5/s/^/#DISABLED /' pcscf/pcscf_init.sh
 
-# Fix 2: Set IMS APN in srsUE config
-sed -i 's/apn = internet/apn = ims/' srslte/ue_5g_zmq.conf
-
-# Fix 3: Add NET_ADMIN capability to IMS containers (needed for routing)
-sed -i '/container_name: icscf/a\    cap_add:\n      - NET_ADMIN' sa-vonr-ibcf-deploy.yaml
-sed -i '/container_name: scscf/a\    cap_add:\n      - NET_ADMIN' sa-vonr-ibcf-deploy.yaml
+# Clone this repo's scripts into home directory
+git clone https://github.com/sudharshan1916/VoNR_Private.git /tmp/vonr
+cp /tmp/vonr/scripts/*.sh ~/
+chmod +x ~/start_vonr.sh ~/vonr_call.sh ~/stop_vonr.sh
+chmod +x ~/verify_vonr_complete.sh ~/vonr_full_kpi_logs.sh
 ```
 
-### 4. Build and Deploy
+---
+
+## Step 3 — Start the Stack
 
 ```bash
-# Pull pre-built images
-docker pull ghcr.io/herlesupreeth/docker_open5gs:master && \
-  docker tag ghcr.io/herlesupreeth/docker_open5gs:master docker_open5gs
-docker pull ghcr.io/herlesupreeth/docker_kamailio:master && \
-  docker tag ghcr.io/herlesupreeth/docker_kamailio:master docker_kamailio
-docker pull ghcr.io/herlesupreeth/docker_pyhss:master && \
-  docker tag ghcr.io/herlesupreeth/docker_pyhss:master docker_pyhss
-docker pull ghcr.io/herlesupreeth/docker_mysql:master && \
-  docker tag ghcr.io/herlesupreeth/docker_mysql:master docker_mysql
-docker pull ghcr.io/herlesupreeth/docker_srslte:master && \
-  docker tag ghcr.io/herlesupreeth/docker_srslte:master docker_srslte
-docker pull ghcr.io/herlesupreeth/docker_srsran:master && \
-  docker tag ghcr.io/herlesupreeth/docker_srsran:master docker_srsran
-
-# Build remaining images
-set -a; source .env; set +a
-docker compose -f sa-vonr-ibcf-deploy.yaml build
-
-# Deploy
-docker compose -f sa-vonr-ibcf-deploy.yaml up -d
-
-# Fix pyHSS database bug (run after containers start)
-sleep 30
-docker exec mysql mysql -u root -pchangeme ims_hss_db \
-  -e "ALTER TABLE operation_log MODIFY item_id INTEGER NULL;"
-docker compose -f sa-vonr-ibcf-deploy.yaml restart pyhss
+~/start_vonr.sh
 ```
 
-### 5. Subscriber Provisioning
+The script does this automatically:
 
-**Open5GS WebUI** at `http://YOUR_HOST_IP:9999` (admin/1423) — Add subscriber:
+| Step | Action |
+|------|--------|
+| 1 | Stop conflicting systemd services + disable ufw |
+| 2 | Remove any leftover containers |
+| 3 | Start 25 core containers via `sa-vonr-ibcf-deploy.yaml` |
+| 4 | Wait 30s for initialization |
+| 5 | Fix pyHSS `operation_log` schema (ALTER TABLE) |
+| 6 | Start srsRAN gNB → wait 15s |
+| 7 | Start srsRAN UE → wait 20s |
+| 8 | Add routing rules on P/I/S-CSCF to reach UE subnet |
+| 9 | Add NAT/MASQUERADE on UPF for IMS traffic |
+| 10 | Install linphonec + tcpdump inside UE container |
+| 11 | Add IMS DNS entries to UE `/etc/hosts` |
+| 12 | Create linphonec configs for UE1 (port 5070) and UE2 (port 5071) |
 
-| Field | Value |
-|---|---|
-| IMSI | 001011234567895 |
-| K | 8baf473f2f8fd09487cccbd7097c6862 |
-| OPC | 8E27B6AF0E692E750F32667A3B14605D |
-| AMF | 8000 |
-| APN 1 | internet — QCI 9, ARP 8 + PCC rules QCI 1 & 2 |
-| APN 2 | ims — QCI 5, ARP 1 + PCC rules QCI 1 & 2 |
-
-**pyHSS** at `http://YOUR_HOST_IP:8080/docs/` — Create APNs and AUC via Swagger UI, then provision IMS subscriber via MySQL:
-
-```bash
-# Create subscriber
-docker exec mysql mysql -u root -pchangeme ims_hss_db -e "
-INSERT INTO subscriber (imsi, enabled, auc_id, default_apn, apn_list, msisdn, ue_ambr_dl, ue_ambr_ul)
-VALUES ('9076543210', 1, 1, 1, '1,3', '9076543210', 0, 0);"
-
-# Create IMS subscriber
-docker exec mysql mysql -u root -pchangeme ims_hss_db -e "
-INSERT INTO ims_subscriber (imsi, msisdn, msisdn_list, scscf_peer, scscf_realm, scscf, ifc_path, sh_profile)
-VALUES ('9076543210', '9076543210', '[9076543210]',
-  'scscf.ims.mnc001.mcc001.3gppnetwork.org',
-  'ims.mnc001.mcc001.3gppnetwork.org',
-  'sip:scscf.ims.mnc001.mcc001.3gppnetwork.org:6060',
-  'default_ifc.xml', 'default_sh_user_data.xml');"
+**Expected output at end:**
+```
+=== VoNR stack ready ===
+PDU Session Establishment successful. IP: 192.168.101.2
+Run: ~/vonr_call.sh
 ```
 
-> ⚠️ **pyHSS Bug:** The `imsi` field in `ims_subscriber`, `subscriber`, and `auc` tables must contain the MSISDN value (`9076543210`), not the real IMSI (`001011234567895`). pyHSS passes the public SIP identity (MSISDN) as the IMSI in its Diameter UAR query.
+> ⚠️ If you see `IP: 192.168.100.x` — the UE got the internet APN. See [Troubleshooting](#troubleshooting).
 
-### 6. Start the RAN
+---
 
-```bash
-# Start gNB
-docker compose -f srsgnb_zmq.yaml up -d
-sleep 15
-# Verify: docker logs srsgnb_zmq | grep "gNB started"
-
-# Start UE
-docker compose -f srsue_5g_zmq.yaml up -d
-sleep 20
-# Verify IMS APN attached (must show 192.168.101.X, NOT 192.168.100.X)
-docker logs srsue_5g_zmq 2>&1 | grep "PDU Session"
-
-# Add routing rules (required after every restart)
-docker exec pcscf ip route add 192.168.101.0/24 via 172.22.0.8 2>/dev/null
-docker exec icscf ip route add 192.168.101.0/24 via 172.22.0.8 2>/dev/null
-docker exec scscf ip route add 192.168.101.0/24 via 172.22.0.8 2>/dev/null
-docker exec upf iptables -t nat -A POSTROUTING \
-  -s 192.168.101.0/24 ! -o ogstun2 -j MASQUERADE 2>/dev/null
-```
-
-### 7. IMS Registration and Call
+## Step 4 — Make a VoNR Call
 
 ```bash
-# Install SIP client inside UE container
-docker exec srsue_5g_zmq apt-get install -y linphone-cli
-
-# Add DNS entry
-docker exec srsue_5g_zmq bash -c \
-  'echo "172.22.0.21 ims.mnc001.mcc001.3gppnetwork.org" >> /etc/hosts'
-
-# Create UE1 config (caller, port 5070)
-docker exec srsue_5g_zmq bash -c 'cat > /root/linphone.cfg << EOF
-[sip]
-sip_port=5070
-sip_tcp_port=5070
-default_proxy=0
-[proxy_0]
-reg_proxy=sip:172.22.0.21
-reg_identity=sip:9076543210@ims.mnc001.mcc001.3gppnetwork.org
-reg_expires=300
-reg_sendregister=1
-publish=0
-[auth_info_0]
-username=9076543210
-userid=9076543210
-passwd=8baf473f2f8fd09487cccbd7097c6862
-realm=ims.mnc001.mcc001.3gppnetwork.org
-EOF'
-
-# Create UE2 config (receiver, port 5071)
-docker exec srsue_5g_zmq bash -c 'cat > /root/linphone2.cfg << EOF
-[sip]
-sip_port=5071
-sip_tcp_port=5071
-default_proxy=0
-[proxy_0]
-reg_proxy=sip:172.22.0.21
-reg_identity=sip:9076543211@ims.mnc001.mcc001.3gppnetwork.org
-reg_expires=300
-reg_sendregister=1
-publish=0
-[auth_info_0]
-username=9076543211
-userid=9076543211
-passwd=8baf473f2f8fd09487cccbd7097c6862
-realm=ims.mnc001.mcc001.3gppnetwork.org
-EOF'
-
-# Start UE2 receiver (with auto-answer)
-docker exec srsue_5g_zmq bash -c '
-(sleep 90; echo "quit") | linphonec -c /root/linphone2.cfg -a > /tmp/ue2.log 2>&1' &
-
-# Wait for UE2 to fully register
-sleep 20
-
-# UE1 makes the VoNR call
-docker exec srsue_5g_zmq bash -c '
-(sleep 5;
- echo "call sip:9076543211@ims.mnc001.mcc001.3gppnetwork.org";
- sleep 20;
- echo "terminate";
- sleep 2;
- echo "quit") | linphonec -c /root/linphone.cfg > /tmp/ue1.log 2>&1'
-
-# Verify
-docker exec srsue_5g_zmq cat /tmp/ue1.log | grep -E "ringing|connected|Media|ended"
-docker exec srsue_5g_zmq cat /tmp/ue2.log | grep -E "answering|connected|Media|ended"
+~/vonr_call.sh
 ```
 
 **Expected output:**
 ```
-# UE1 (caller)
-Call 1 to sip:9076543211@... ringing.
-Call 1 with sip:9076543211@... connected.
-Media streams established with sip:9076543211@... for call 1 (audio).
-Call 1 with sip:9076543211@... ended (No error).
+=== UE1 ===
+Call 1 to sip:9076543211@ims.mnc001.mcc001.3gppnetwork.org ringing.
+Call 1 with sip:9076543211@ims.mnc001.mcc001.3gppnetwork.org connected.
+Media streams established with sip:9076543211@ims.mnc001.mcc001.3gppnetwork.org for call 1 (audio).
+Call 1 with sip:9076543211@ims.mnc001.mcc001.3gppnetwork.org ended (No error).
 
-# UE2 (receiver)
+=== UE2 ===
 -------auto answering to call-------
-Call 1 with sip:9076543210@... connected.
-Media streams established with sip:9076543210@... for call 1 (audio).
-Call 1 with sip:9076543210@... ended (No error).
+Call 1 with sip:9076543210@ims.mnc001.mcc001.3gppnetwork.org connected.
+Media streams established with sip:9076543210@ims.mnc001.mcc001.3gppnetwork.org for call 1 (audio).
+Call 1 with sip:9076543210@ims.mnc001.mcc001.3gppnetwork.org ended (No error).
 ```
+
+If you see `ringing → connected → Media streams established → ended (No error)` on **both UEs** — VoNR is working.
 
 ---
 
-## Measured Results
-
-Metrics captured via tshark from a live VoNR call (pcap in `results/captures/`):
-
-| Metric | Measured | 3GPP Requirement | Status |
-|---|---|---|---|
-| Packet Loss (UL) | **0.0%** | < 1% | ✅ Pass |
-| Packet Loss (DL) | **0.0%** | < 1% | ✅ Pass |
-| Mean Jitter (UL) | **9.203 ms** | < 50 ms | ✅ Pass |
-| Mean Jitter (DL) | **9.197 ms** | < 50 ms | ✅ Pass |
-| Max Jitter | **10.516 ms** | < 50 ms | ✅ Pass |
-| MOS Score | **3.58** | > 3.5 | ✅ Pass |
-| Registration Latency | **318 ms** | < 500 ms | ✅ Pass |
-| Call Teardown | **10 ms** | < 500 ms | ✅ Pass |
-| Codec | **Opus** | AMR-WB / G.711 | ✅ Good |
-| Call Setup Latency | ~16 s | < 2 s | ⚠️ High* |
-
-> *Call setup latency is high due to ICE/STUN negotiation in linphonec under software simulation. Disabling ICE in linphonec config reduces this significantly. Real hardware deployments typically achieve 400–800 ms.
-
-**MOS Score Calculation (E-model):**
-```
-MOS = 4.5 - (mean_jitter × 0.1) - (packet_loss% × 0.3)
-    = 4.5 - (9.203 × 0.1) - (0 × 0.3)
-    = 3.58  →  "Good" quality
-```
-
----
-
-## QoS and QFI Handling
-
-VoNR separates voice and data traffic using dedicated QoS flows:
-
-| QFI | 5QI | Type | APN | Interface |
-|---|---|---|---|---|
-| 1 | 1 | GBR (Guaranteed) | ims | ogstun2 (192.168.101.0/24) |
-| 9 | 9 | Non-GBR (Best Effort) | internet | ogstun (192.168.100.0/24) |
+## Step 5 — Full KPI Measurement
 
 ```bash
-# Verify QoS separation — two separate UPF tunnel interfaces
-docker exec upf ip addr show ogstun   # Internet (QFI 9)
-docker exec upf ip addr show ogstun2  # IMS voice (QFI 1)
+~/vonr_full_kpi_logs.sh
+```
 
-# Confirm SMF assigned IMS DNN correctly
-docker logs smf 2>&1 | grep "DNN\[ims\]"
+This script captures a complete VoNR call, copies the pcap to `~/vonr.pcap`, and prints:
+
+- **SIP call flow** — every REGISTER, INVITE, 180, 200, ACK, BYE with timestamps
+- **Call setup time** — time from INVITE to 200 OK (our result: **0.061 seconds**)
+- **Call duration** — time from INVITE to BYE (our result: **19.877 seconds**)
+- **RTP KPIs** — packets, loss, mean delta, jitter per stream
+
+**Expected output (abbreviated):**
+```
+SIP CALL FLOW
+==============================
+24.87s   INVITE
+24.94s   180 Ringing
+24.94s   200 OK
+25.16s   ACK
+44.75s   BYE
+44.76s   200 OK
+
+Call Setup Time: 0.061 seconds
+Call Duration:   19.877 seconds
+
+RTP KPI SUMMARY
+==============================
+Packets: 978     Lost: 0 (0.0%)
+Mean Jitter: 9.912ms    Max Jitter: 10.604ms
+Mean Delta: 19.988ms    Codec: opus
 ```
 
 ---
 
-## Known Issues and Fixes
+## Step 6 — Verify Everything
 
-| Issue | Root Cause | Fix |
-|---|---|---|
-| `412 Register N5 QoS Failed` | P-CSCF init enables WITH_N5 when DEPLOY_MODE=5G | Disable in `pcscf/pcscf_init.sh` |
-| UAR returns empty (no server_name) | pyHSS queries IMSI column with MSISDN value | Set `imsi=MSISDN` in all 3 DB tables |
-| UE gets 192.168.100.X (wrong APN) | Container reads `/etc/srsran/ue.conf`, not mounted file | Edit both host file and container file |
-| pyHSS API returns 400 | `item_id` NOT NULL constraint bug | `ALTER TABLE operation_log MODIFY item_id INTEGER NULL` |
-| 0 Diameter peers after restart | pyHSS doesn't re-accept connections automatically | Restart pyhss first, then icscf/scscf |
-| Port 9090 in use | Native Open5GS services running | `systemctl stop open5gs-*` |
-| baresip stdio fails | epoll on stdin not permitted in container | Use linphonec instead |
-| Call cancelled (487) | UE2 not registered before UE1 calls | Wait 20s after UE2 starts before calling |
-
----
-
-## Hardware Transition Plan
-
-| Phase | RAN | Description |
-|---|---|---|
-| **Phase 1** (current) | srsRAN ZMQ | Full software simulation, no hardware needed |
-| **Phase 2** | UERANSIM | Better multi-UE support, more stable signaling |
-| **Phase 3** | USRP B210 + real SIM | Over-the-air transmission, real 5G UE |
-
-**Phase 2 — Switch to UERANSIM:**
 ```bash
-docker compose -f srsgnb_zmq.yaml down
-docker compose -f srsue_5g_zmq.yaml down
-docker compose -f nr-gnb.yaml up -d
-docker compose -f nr-ue.yaml up -d
+~/verify_vonr_complete.sh
 ```
 
-**Phase 3 — Real hardware requirements:**
-- SDR: USRP B210 (~$1,500) or LimeSDR Mini (~$200)
-- Programmable SIM: sysmoISIM-SJA5
-- UE: Android phone with 5G SA support (Pixel 6/7)
+Runs automated checks across all layers. **Expected: 55/55 PASS**.
+
+| Section | Checks |
+|---------|--------|
+| 1. Containers | All 21 required NFs are Up |
+| 2. gNB | Started, AMF connected, ZMQ active |
+| 3. UE 5G | Random Access, RRC Connected, IMS IP 192.168.101.2 |
+| 4. 5G Core | AMF, SMF IMS DNN, UPF ogstun2 tunnel, NAT rule |
+| 5. IMS Routing | Routes to UE subnet on P/I/S-CSCF |
+| 6. Diameter | pyHSS peers connected |
+| 7. Subscriber DB | AUC, subscriber, IMS subscriber, APNs |
+| 8. SIP Registration | Both UEs registered, no 412 errors |
+| 9. Live Call Test | Ringing → connected → media → clean BYE |
+| 11. QoS | ogstun QFI=9 and ogstun2 QFI=1 active |
 
 ---
 
-## Repository Structure
+## Step 7 — Stop Before Shutdown
 
+```bash
+~/stop_vonr.sh
 ```
-vonr-simulation/
-├── README.md
-├── config/
-│   ├── .env                    # Environment variables
-│   ├── kamailio/
-│   │   ├── pcscf.cfg           # P-CSCF Kamailio config
-│   │   ├── pcscf_init.sh       # P-CSCF init script (WITH_N5 fix applied)
-│   │   └── scscf.cfg           # S-CSCF Kamailio config
-│   └── srsran/
-│       └── ue_5g_zmq.conf      # srsRAN UE config (apn=ims)
-├── scripts/
-│   ├── deploy.sh               # Full stack deployment
-│   └── call_test.sh            # VoNR call test with metrics
-└── results/
-    ├── captures/
-    │   └── call_metrics.pcap   # Captured VoNR call (40KB)
-    └── metrics/
-        └── rtp_metrics.txt     # Measured RTP quality metrics
+
+Always run this before shutting down. Cleanly stops all containers.
+
+---
+
+## Critical Bugs Fixed
+
+> These bugs exist in the upstream `docker_open5gs` repo. All fixes are applied automatically by `start_vonr.sh`. Documented here so you understand what was changed and why.
+
+---
+
+### Bug 1 — pyHSS IMSI/MSISDN Mismatch ⭐ Most Critical
+
+**Symptom:** SIP REGISTER never gets a response. I-CSCF Diameter UAR returns empty `server_name` AVP.
+
+**Root cause:** pyHSS passes the public SIP identity (MSISDN = `9076543210`) as the key to query `WHERE imsi = ?`. But the database stores the real IMSI (`001011234567895`). The SQL returns zero rows, silently.
+
+**Fix — set `imsi = MSISDN` in all three IMS tables:**
+```sql
+UPDATE auc SET imsi='9076543210' WHERE id=1;
+UPDATE subscriber SET imsi='9076543210' WHERE id=1;
+UPDATE ims_subscriber SET imsi='9076543210' WHERE id=1;
+```
+
+**How to debug:** Check pyHSS SQLAlchemy logs:
+```bash
+docker logs pyhss 2>&1 | grep "WHERE imsi" | tail -3
+```
+
+---
+
+### Bug 2 — N5 QoS Authorization Failure (412 Error)
+
+**Symptom:** `412 Precondition Failed — N5 QoS authorization failed` on every SIP REGISTER.
+
+**Root cause:** `pcscf/pcscf_init.sh` enables `WITH_N5` flag when `DEPLOY_MODE=5G`. PCF N5 interface is not configured for IMS in the default stack.
+
+**Fix — apply before building containers:**
+```bash
+sed -i '/WITH_N5/s/^/#DISABLED /' pcscf/pcscf_init.sh
+```
+
+**Verify fix:**
+```bash
+docker logs pcscf 2>&1 | grep "412" | wc -l   # must be 0
+```
+
+---
+
+### Bug 3 — srsUE Reads Wrong Config File
+
+**Symptom:** Setting `apn = ims` in the mounted config has no effect. UE always gets `192.168.100.x` (internet APN) instead of `192.168.101.x` (IMS APN).
+
+**Root cause:** The container reads `/etc/srsran/ue.conf` at runtime — NOT the mounted file at `/mnt/srslte/ue_5g_zmq.conf`.
+
+**Fix — edit both:**
+```bash
+sed -i 's/apn = internet/apn = ims/' srslte/ue_5g_zmq.conf
+docker exec srsue_5g_zmq sed -i 's/apn = internet/apn = ims/' /etc/srsran/ue.conf
+```
+
+---
+
+### Bug 4 — pyHSS operation_log Schema Error
+
+**Symptom:** pyHSS crashes with `IntegrityError: NOT NULL constraint failed: operation_log.item_id` when processing SAR messages.
+
+**Fix — run after every fresh container start:**
+```bash
+docker exec mysql mysql -u root -pchangeme ims_hss_db \
+  -e "ALTER TABLE operation_log MODIFY item_id INTEGER NULL;"
+```
+Already included in `start_vonr.sh`.
+
+---
+
+### Bug 5 — Diameter Peer Reconnection Timing
+
+**Symptom:** After restarting icscf/scscf, Diameter UAR returns `Connection refused` on port 3875.
+
+**Root cause:** pyHSS Diameter server needs ~15 seconds to start listening after container start.
+
+**Fix — always start in this order:**
+```bash
+docker compose -f sa-vonr-ibcf-deploy.yaml up -d   # starts pyHSS
+sleep 30                                             # wait for Diameter to listen
+docker compose -f srsgnb_zmq.yaml up -d
+docker compose -f srsue_5g_zmq.yaml up -d
+```
+Already handled in `start_vonr.sh`.
+
+---
+
+### Bug 6 — baresip Cannot Read stdin in Docker
+
+**Symptom:** baresip starts but ignores all typed commands. Calls cannot be made.
+
+**Root cause:** Docker security context blocks `epoll` on file descriptor 0 (stdin).
+
+**Fix:** Use **linphonec** instead. It reads stdin correctly inside Docker containers.
+
+---
+
+### Bug 7 — linphonec Overwrites Config with Wrong Defaults
+
+**Symptom:** `verify_server_certs=1` appears in config after each run, silently blocking SIP registration.
+
+**Root cause:** linphonec writes its state database to `$HOME/.local/share/linphone/` and overwrites your config on startup if HOME is shared.
+
+**Fix — give each UE its own HOME directory:**
+```bash
+docker exec srsue_5g_zmq mkdir -p /root/ue1/.local/share/linphone
+docker exec srsue_5g_zmq mkdir -p /root/ue2/.local/share/linphone
+
+# Run UE1
+docker exec srsue_5g_zmq bash -c 'export HOME=/root/ue1; linphonec -c /root/ue1/linphonerc'
+
+# Run UE2
+docker exec srsue_5g_zmq bash -c 'export HOME=/root/ue2; linphonec -c /root/ue2/linphonerc'
+```
+
+---
+
+### Bug 8 — DNS Resolution Fails for IMS Domain
+
+**Symptom:** `belle-sip-error: DNS resolution failed for scscf.ims.mnc001.mcc001.3gppnetwork.org`
+
+**Fix:**
+```bash
+docker exec srsue_5g_zmq bash -c '
+echo "172.22.0.21 ims.mnc001.mcc001.3gppnetwork.org" >> /etc/hosts
+echo "172.22.0.20 scscf.ims.mnc001.mcc001.3gppnetwork.org" >> /etc/hosts
+echo "172.22.0.19 icscf.ims.mnc001.mcc001.3gppnetwork.org" >> /etc/hosts'
+```
+Already included in `start_vonr.sh`.
+
+---
+
+### Bug 9 — tcpdump Inside Container Captures 0 Packets
+
+**Symptom:** `tcpdump -i eth0` inside srsue_5g_zmq container captures nothing during an active call.
+
+**Root cause:** Docker iptables forwarding — inter-container traffic does not pass through the container's `eth0` in a way tcpdump can intercept.
+
+**Fix:** Capture on the Docker network inside the container using `-i any`:
+```bash
+docker exec -u root srsue_5g_zmq bash -c \
+  "tcpdump -i any -w /tmp/vonr.pcap port 5060 or udp"
+```
+This is exactly what `vonr_full_kpi_logs.sh` does — it captures on `-i any` instead of `-i eth0`.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `IP: 192.168.100.x` not `101.x` | Wrong APN in ue.conf | `docker exec srsue_5g_zmq sed -i 's/apn = internet/apn = ims/' /etc/srsran/ue.conf` then restart |
+| SIP REGISTER never reaches P-CSCF | Missing DNS entries | Add ims.mnc001... to `/etc/hosts` inside container |
+| 412 on SIP REGISTER | N5 QoS enabled | `sed -i '/WITH_N5/s/^/#/' pcscf/pcscf_init.sh` and restart pcscf |
+| Call errors without ringing | UE2 not registered yet | Wait 20s after starting UE2 before calling |
+| Diameter UAR returns empty | pyHSS IMSI/MSISDN bug | Set `imsi = MSISDN` in all 3 DB tables |
+| pyHSS crashes on SAR | operation_log schema | `ALTER TABLE operation_log MODIFY item_id INTEGER NULL` |
+| Containers conflict on start | Old containers still running | `docker stop $(docker ps -q) && docker rm $(docker ps -aq)` |
+| linphonec ignores config | Wrong HOME directory | Use `export HOME=/root/ue1` before running linphonec |
+| tcpdump captures 0 packets | Wrong interface | Use `-i any` not `-i eth0` inside container |
+| Call setup > 16 seconds | ICE/STUN negotiation | Expected in linphonec — disable ICE in linphonerc for faster setup |
+
+---
+
+## Scripts Reference
+
+| Script | Purpose | When to Use |
+|--------|---------|-------------|
+| `start_vonr.sh` | Start full stack (26 containers + all config) | After every reboot |
+| `vonr_call.sh` | Make a VoNR call between UE1 and UE2 | Quick call test |
+| `vonr_full_kpi_logs.sh` | Full KPI measurement — SIP flow, setup time, RTP metrics | For measurements |
+| `verify_vonr_complete.sh` | 55-point automated verification | Confirm everything works |
+| `stop_vonr.sh` | Stop all containers cleanly | Before shutdown |
+
+---
+
+## Subscriber Configuration
+
+### Open5GS 5G Core — via WebUI at `http://localhost:9999` (admin / 1423)
+
+| Field | Value |
+|-------|-------|
+| IMSI | `001011234567895` |
+| Key (Ki) | `8baf473f2f8fd09487cccbd7097c6862` |
+| OPC | `8E27B6AF0E692E750F32667A3B14605D` |
+| AMF | `8000` |
+| APN 1 | `internet` — QCI 9, ARP 8 |
+| APN 2 | `ims` — QCI 5, ARP 1 + PCC rule QCI 1 GBR 128/128 kbps |
+
+### IMS pyHSS — via MySQL direct insert
+
+> **Important:** The `imsi` column must be set to the **MSISDN value** (not the real IMSI) due to the pyHSS bug described in Bug 1.
+
+```sql
+-- Connect: docker exec -it mysql mysql -u root -pchangeme ims_hss_db
+
+-- APN entries
+INSERT INTO apn (apn_id, apn) VALUES (1, 'internet'), (3, 'ims');
+
+-- Authentication credentials (imsi = MSISDN intentionally)
+INSERT INTO auc (id, imsi, ki, opc, sqn, auth_scheme)
+VALUES (1, '9076543210', '8baf473f2f8fd09487cccbd7097c6862',
+        '8E27B6AF0E692E750F32667A3B14605D', 0, 'milenage');
+
+-- Subscriber (imsi = MSISDN intentionally, apn_list = '1,3')
+INSERT INTO subscriber (id, imsi, msisdn, auc_id, default_apn, apn_list)
+VALUES (1, '9076543210', '9076543210', 1, 1, '1,3');
+
+-- IMS subscriber with S-CSCF address
+INSERT INTO ims_subscriber (id, imsi, msisdn, scscf)
+VALUES (1, '9076543210', '9076543210',
+        'sip:scscf.ims.mnc001.mcc001.3gppnetwork.org:6060');
+
+-- Second subscriber (UE2)
+INSERT INTO auc (id, imsi, ki, opc, sqn, auth_scheme)
+VALUES (2, '9076543211', '8baf473f2f8fd09487cccbd7097c6862',
+        '8E27B6AF0E692E750F32667A3B14605D', 0, 'milenage');
+INSERT INTO subscriber (id, imsi, msisdn, auc_id, default_apn, apn_list)
+VALUES (2, '9076543211', '9076543211', 2, 1, '1,3');
+INSERT INTO ims_subscriber (id, imsi, msisdn, scscf)
+VALUES (2, '9076543211', '9076543211',
+        'sip:scscf.ims.mnc001.mcc001.3gppnetwork.org:6060');
 ```
 
 ---
 
 ## References
 
-- [3GPP TS 23.228](https://www.3gpp.org/ftp/Specs/archive/23_series/23.228/) — IMS Stage 2
-- [3GPP TS 23.501](https://www.3gpp.org/ftp/Specs/archive/23_series/23.501/) — 5G System Architecture
-- [Open5GS Documentation](https://open5gs.org/open5gs/docs/)
-- [srsRAN Project](https://docs.srsran.com/projects/project)
-- [Kamailio IMS](https://www.kamailio.org/wiki/)
-- [docker_open5gs](https://github.com/herlesupreeth/docker_open5gs) by herlesupreeth
-- [pyHSS](https://github.com/nickvsnetworking/pyhss) by nickvsnetworking
+| Resource | Link |
+|----------|------|
+| Base Docker stack | https://github.com/herlesupreeth/docker_open5gs |
+| Open5GS docs | https://open5gs.org/open5gs/docs/ |
+| srsRAN Project (gNB) | https://docs.srsran.com/projects/project |
+| srsRAN 4G (srsUE) | https://docs.srsran.com/projects/4g |
+| Kamailio IMS | https://www.kamailio.org/wiki/ |
+| pyHSS | https://github.com/nickvsnetworking/pyhss |
+| RTPEngine | https://github.com/sipwise/rtpengine |
+| 3GPP TS 23.228 | IMS Stage 2 architecture |
+| 3GPP TS 23.501 | 5G System architecture |
+| 3GPP TS 26.114 | Voice quality requirements (jitter < 50ms, loss < 1%) |
+| ITU-T G.107 | E-model for MOS score computation |
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed diagrams.
+---
+
+## LLM Usage Declaration
+
+Scripts in this repository were developed with assistance from **Claude (Anthropic)**. All generated code is marked with:
+
+```bash
+# Claude Generated Code Snippet for TWiN Project
+```
+
+All scripts were validated against the live running stack. The 55-point verification suite (`verify_vonr_complete.sh`) must pass before any script is accepted. Bugs were identified and fixed manually through log analysis — not by LLM.
+
+---
+
+*IIT Hyderabad — TWiN Project RP1141 — Sudharshan Mothukuru — 2026*

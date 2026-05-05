@@ -1,11 +1,34 @@
-VoNR Call Metrics - Measured April 2026
-========================================
-Codec       : Opus
-Packets     : 174 (each direction)
-Packet Loss : 0.0%
-Mean Jitter : 9.2ms
-Max Jitter  : 10.5ms
-MOS Score   : 3.58 (Good)
-Setup Time  : ~16s (ZMQ simulation overhead)
-Registration: 318ms
-Teardown    : 10ms
+VoNR Call Metrics - Measured May 5, 2026
+==========================================
+Capture File  : vonr.pcap (tcpdump -i any)
+Call Duration : 19.877 seconds
+Codec         : Opus
+
+Stream 1 (RTPEngine → UE)
+--------------------------
+Packets       : 978
+Packet Loss   : 0.0%
+Mean Delta    : 19.988ms
+Mean Jitter   : 9.912ms
+Max Jitter    : 10.604ms
+
+Stream 2 (UE → RTPEngine)
+--------------------------
+Packets       : 978
+Packet Loss   : 0.0%
+Mean Delta    : 19.988ms
+Mean Jitter   : 9.910ms
+Max Jitter    : 10.601ms
+
+SIP Timing
+-----------
+Call Setup Time (INVITE → 200 OK) : 0.061 seconds
+Call Duration  (INVITE → BYE)     : 19.877 seconds
+IMS Registration Latency          : ~318ms
+
+3GPP Compliance
+----------------
+Packet Loss   : 0.0%   (limit < 1%)   PASS
+Mean Jitter   : 9.91ms (limit < 50ms) PASS
+Max Jitter    : 10.60ms(limit < 50ms) PASS
+MOS Score     : ~3.58  (limit > 3.5)  PASS
