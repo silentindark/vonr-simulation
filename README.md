@@ -1,6 +1,6 @@
 # VoNR Demo using Open5GS
 ### End-to-End Voice over New Radio Simulation
-**IIT Hyderabad — TWiN Project | Sudharshan Mothukuru (RP1141) | 2026**
+**Sudharshan Mothukuru (RP1141), NeWS Lab, IIT Hyderabad**
 
 > **What this is:** A complete, working VoNR (Voice over 5G New Radio) simulation on a single Ubuntu machine. Two software phones make a real voice call over a fully simulated 5G Standalone network with IMS — no hardware, no SIM cards, no spectrum license.
 
@@ -45,14 +45,14 @@ All results from live capture on May 5, 2026 — `vonr.pcap` (20-second call, Op
 
 ### Call Quality (RTP)
 
-| Metric | Stream 1 (UE→RTPEngine) | Stream 2 (RTPEngine→UE) | 3GPP Limit | Status |
-|--------|------------------------|------------------------|------------|--------|
-| Packets | 978 | 978 | — | ✅ |
-| Packet Loss | **0.0%** | **0.0%** | < 1% | ✅ Pass |
-| Mean Delta | **19.988ms** | **19.988ms** | ~20ms (50pps) | ✅ Pass |
-| Mean Jitter | **9.912ms** | **9.910ms** | < 50ms | ✅ Pass |
-| Max Jitter | **10.604ms** | **10.601ms** | < 50ms | ✅ Pass |
-| Codec | **Opus** | **Opus** | — | ✅ |
+| Metric | Stream 1 (UE→RTPEngine) | Stream 2 (RTPEngine→UE) | 3GPP Limit |
+|--------|------------------------|------------------------|------------|
+| Packets | 978 | 978 | — |
+| Packet Loss | **0.0%** | **0.0%** | < 1% |
+| Mean Delta | **19.988ms** | **19.988ms** | ~20ms (50pps) |
+| Mean Jitter | **9.912ms** | **9.910ms** | < 50ms |
+| Max Jitter | **10.604ms** | **10.601ms** | < 50ms |
+| Codec | **Opus** | **Opus** | — |
 
 ### Call Timing
 
@@ -97,29 +97,29 @@ VoNR stack is fully operational!
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Single Ubuntu Host                           │
 │                                                                     │
-│  ┌─────────────┐   ZMQ    ┌─────────────┐   N2/N3  ┌───────────┐  │
-│  │  srsRAN UE  │◄────────►│ srsRAN gNB  │◄────────►│  Open5GS  │  │
-│  │ linphonec   │          │ (ZMQ RF sim)│          │  5G Core  │  │
-│  │ UE1: :5070  │          │ 172.22.0.37 │          │ AMF / SMF │  │
-│  │ UE2: :5071  │          └─────────────┘          │ UPF / NRF │  │
-│  │ 172.22.0.34 │                                   └─────┬─────┘  │
-│  └──────┬──────┘                                         │         │
-│         │ SIP over IMS APN                       ogstun2 │         │
-│         │ 192.168.101.2                    192.168.101.1 │         │
-│         ▼                                                │         │
-│  ┌─────────────────────────────────┐                    │         │
-│  │  Kamailio IMS  (172.22.0.x)     │◄───────────────────┘         │
-│  │  P-CSCF :5060  →  I-CSCF :4060 │                              │
-│  │  I-CSCF        →  S-CSCF :6060 │                              │
-│  └──────┬──────────────┬───────────┘                              │
-│         │ Diameter Cx  │ RTP relay                                 │
-│         ▼              ▼                                           │
-│  ┌──────────┐   ┌─────────────┐                                   │
-│  │  pyHSS   │   │  RTPEngine  │  ← relays Opus audio packets      │
-│  │  MySQL   │   │ 172.22.0.16 │                                   │
-│  └──────────┘   └─────────────┘                                   │
+│  ┌─────────────┐   ZMQ    ┌─────────────┐   N2/N3  ┌───────────┐    │
+│  │  srsRAN UE  │◄────────►│ srsRAN gNB  │◄────────►│  Open5GS  │    │
+│  │ linphonec   │          │ (ZMQ RF sim)│          │  5G Core  │    │
+│  │ UE1: :5070  │          │ 172.22.0.37 │          │ AMF / SMF │    │
+│  │ UE2: :5071  │          └─────────────┘          │ UPF / NRF │    │
+│  │ 172.22.0.34 │                                   └─────┬─────┘    │
+│  └──────┬──────┘                                         │          │
+│         │ SIP over IMS APN                       ogstun2 │          │
+│         │ 192.168.101.2                    192.168.101.1 │          │
+│         ▼                                                │          │
+│  ┌─────────────────────────────────┐                    │           │
+│  │  Kamailio IMS  (172.22.0.x)     │◄───────────────────┘           │
+│  │  P-CSCF :5060  →  I-CSCF :4060 │                                 │
+│  │  I-CSCF        →  S-CSCF :6060 │                                 │ 
+│  └──────┬──────────────┬───────────┘                                │
+│         │ Diameter Cx  │ RTP relay                                  │
+│         ▼              ▼                                            │
+│  ┌──────────┐   ┌─────────────┐                                     │
+│  │  pyHSS   │   │  RTPEngine  │  ← relays Opus audio packets        │
+│  │  MySQL   │   │ 172.22.0.16 │                                     │
+│  └──────────┘   └─────────────┘                                     │
 │                                                                     │
-│  Docker Network: 172.22.0.0/24    26 containers total              │
+│  Docker Network: 172.22.0.0/24    26 containers total               │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -227,7 +227,7 @@ PDU Session Establishment successful. IP: 192.168.101.2
 Run: ~/vonr_call.sh
 ```
 
-> ⚠️ If you see `IP: 192.168.100.x` — the UE got the internet APN. See [Troubleshooting](#troubleshooting).
+>  If you see `IP: 192.168.100.x` — the UE got the internet APN. See [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -331,7 +331,7 @@ Always run this before shutting down. Cleanly stops all containers.
 
 ---
 
-### Bug 1 — pyHSS IMSI/MSISDN Mismatch ⭐ Most Critical
+### Bug 1 — pyHSS IMSI/MSISDN Mismatch Most Critical
 
 **Symptom:** SIP REGISTER never gets a response. I-CSCF Diameter UAR returns empty `server_name` AVP.
 
@@ -568,18 +568,3 @@ VALUES (2, '9076543211', '9076543211',
 | 3GPP TS 26.114 | Voice quality requirements (jitter < 50ms, loss < 1%) |
 | ITU-T G.107 | E-model for MOS score computation |
 
----
-
-## LLM Usage Declaration
-
-Scripts in this repository were developed with assistance from **Claude (Anthropic)**. All generated code is marked with:
-
-```bash
-# Claude Generated Code Snippet for TWiN Project
-```
-
-All scripts were validated against the live running stack. The 55-point verification suite (`verify_vonr_complete.sh`) must pass before any script is accepted. Bugs were identified and fixed manually through log analysis — not by LLM.
-
----
-
-*IIT Hyderabad — TWiN Project RP1141 — Sudharshan Mothukuru — 2026*
