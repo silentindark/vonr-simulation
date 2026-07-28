@@ -26,6 +26,7 @@
 - [Prerequisites](#prerequisites)
 - [Step 1 — Install Dependencies](#step-1--install-dependencies)
 - [Step 2 — Clone and Configure](#step-2--clone-and-configure)
+- [Step 2.5 — Provision Subscribers](#step-25--provision-subscribers-required-not-automated-by-any-script)
 - [Step 3 — Start the Stack](#step-3--start-the-stack)
 - [Step 4 — Make a VoNR Call](#step-4--make-a-vonr-call)
 - [Step 5 — Full KPI Measurement](#step-5--full-kpi-measurement)
@@ -140,6 +141,7 @@ VoNR stack is fully operational!
 | **UERANSIM** | **srsRAN (ZMQ)** | srsRAN simulates full L1/L2/L3 stack (HARQ, MAC, RLC, PDCP) — more realistic protocol behavior |
 | **RTPProxy** | **RTPEngine** | RTPEngine is actively maintained and already integrated in docker_open5gs |
 | **Wireshark** | **tshark + tcpdump** | Same libpcap engine, works headless in Docker; tshark gives scriptable KPI extraction |
+| **IBCF** (`sa-vonr-ibcf-deploy.yaml`) | **No IBCF** (`sa-vonr-deploy.yaml`) | `ibcf`'s build fetches an ETSI codec spec that etsi.org now blocks (403); it's not on the VoNR call path anyway ([Bug 10](#bug-10--ibcf-build-fails-on-external-etsi-download-403-forbidden)) |
 
 ---
 
@@ -188,12 +190,60 @@ cd docker_open5gs
 # Without this, SIP REGISTER returns 412 error
 sed -i '/WITH_N5/s/^/#DISABLED /' pcscf/pcscf_init.sh
 
+# CRITICAL FIX — srsUE reads apn from this file at runtime (see Bug 3)
+sed -i 's/apn = internet/apn = ims/' srslte/ue_5g_zmq.conf
+
+# CRITICAL FIX — set DOCKER_HOST_IP / *_ADVERTISE_IP in .env to THIS machine's
+# real LAN IP (`ip -4 addr show`), not the placeholder in the file.
+
 # Clone this repo's scripts into home directory
 git clone https://github.com/sudharshan1916/VoNR_Private.git /tmp/vonr
 cp /tmp/vonr/scripts/*.sh ~/
 chmod +x ~/start_vonr.sh ~/vonr_call.sh ~/stop_vonr.sh
 chmod +x ~/verify_vonr_complete.sh ~/vonr_full_kpi_logs.sh
 ```
+
+> **Use `sa-vonr-deploy.yaml`, not `sa-vonr-ibcf-deploy.yaml`.** The `ibcf` image's
+> build downloads an ETSI EVS codec spec (`wget www.etsi.org/...zip`) that now
+> returns `403 Forbidden` from etsi.org — the build fails and nothing comes up.
+> `ibcf` (voicemail/interconnect border function) is not part of the VoNR call
+> path in the [Architecture](#architecture) diagram above, so skip it — after
+> copying the scripts below, patch the compose file reference:
+> ```bash
+> sed -i 's/sa-vonr-ibcf-deploy.yaml/sa-vonr-deploy.yaml/' ~/start_vonr.sh
+> ```
+> If you *do* want `ibcf`, add `NET_ADMIN`/routing yourself and be ready to
+> patch its Dockerfile to skip the EVS codec `wget` step.
+
+### Get the pre-built images (don't let `docker compose up` try to pull them)
+
+The images referenced in the compose files (`docker_open5gs`, `docker_kamailio`,
+`docker_pyhss`, `docker_mysql`, `docker_srslte`, `docker_srsran`, ...) are not on
+Docker Hub — they must be pulled from GHCR and locally re-tagged, or `up -d`
+will fail with `pull access denied`:
+
+```bash
+for img in docker_open5gs docker_grafana docker_metrics docker_pyhss \
+           docker_kamailio docker_mysql docker_srslte docker_srsran; do
+  docker pull ghcr.io/herlesupreeth/${img}:master
+  docker tag ghcr.io/herlesupreeth/${img}:master ${img}
+done
+```
+
+`dns` and `rtpengine` have no pre-built image — they build from source on
+first `docker compose up -d` (takes a few extra minutes, no action needed).
+
+---
+
+## Step 2.5 — Provision Subscribers (REQUIRED, not automated by any script)
+
+Neither `start_vonr.sh` nor the WebUI login work out of the box for this. You
+must provision **both** the 5G core subscriber and the two IMS/pyHSS
+subscribers *before* starting the UE, or registration will silently fail.
+See [Subscriber Configuration](#subscriber-configuration) below for the exact,
+verified commands (the WebUI login is blocked by a CSRF check, and the SQL in
+older versions of this README used column names that don't exist in the
+current pyHSS schema — use the corrected SQL there, not `id`).
 
 ---
 
@@ -209,7 +259,7 @@ The script does this automatically:
 |------|--------|
 | 1 | Stop conflicting systemd services + disable ufw |
 | 2 | Remove any leftover containers |
-| 3 | Start 25 core containers via `sa-vonr-ibcf-deploy.yaml` |
+| 3 | Start 22 core containers via `sa-vonr-deploy.yaml` (no `ibcf`, see Step 2) |
 | 4 | Wait 30s for initialization |
 | 5 | Fix pyHSS `operation_log` schema (ALTER TABLE) |
 | 6 | Start srsRAN gNB → wait 15s |
@@ -220,6 +270,13 @@ The script does this automatically:
 | 11 | Add IMS DNS entries to UE `/etc/hosts` |
 | 12 | Create linphonec configs for UE1 (port 5070) and UE2 (port 5071) |
 
+> Step 8 needs `cap_add: NET_ADMIN` on `icscf` and `scscf` in the compose file
+> to actually succeed (only `pcscf` has it by default) — see
+> [Bug 12](#bug-12--icscfscscf-route-add-fails-silently-no-net_admin). Without
+> subscribers provisioned (Step 2.5) and that capability added, this step will
+> still report "ready" but the UE/calls will not actually work — the script
+> doesn't verify its own success.
+
 **Expected output at end:**
 ```
 === VoNR stack ready ===
@@ -228,6 +285,17 @@ Run: ~/vonr_call.sh
 ```
 
 >  If you see `IP: 192.168.100.x` — the UE got the internet APN. See [Troubleshooting](#troubleshooting).
+>
+>  If the UE hangs forever at `Attaching UE...` with no further log output,
+>  the gNB and UE ZMQ link went stale (usually after restarting only one of
+>  them). Recreate **both together**:
+>  ```bash
+>  cd ~/docker_open5gs
+>  docker compose -f srsue_5g_zmq.yaml down
+>  docker compose -f srsgnb_zmq.yaml down
+>  docker compose -f srsgnb_zmq.yaml up -d && sleep 15
+>  docker compose -f srsue_5g_zmq.yaml up -d
+>  ```
 
 ---
 
@@ -473,6 +541,75 @@ This is exactly what `vonr_full_kpi_logs.sh` does — it captures on `-i any` in
 
 ---
 
+### Bug 10 — `ibcf` Build Fails on External ETSI Download (403 Forbidden)
+
+**Symptom:** `docker compose -f sa-vonr-ibcf-deploy.yaml up -d` fails while building `ibcf`, with:
+```
+ERROR: process "/bin/sh -c wget www.etsi.org/deliver/.../ts_126443v160100p0.zip" did not complete successfully: exit code: 8
+403 Forbidden
+```
+
+**Root cause:** `ibcf`'s Dockerfile fetches an ETSI EVS codec spec at build time; etsi.org now blocks this request (likely bot/UA filtering). This is an external dependency, not a bug in this repo, but it currently makes `sa-vonr-ibcf-deploy.yaml` unusable as-is.
+
+**Fix:** Use `sa-vonr-deploy.yaml` instead (see [Step 2](#step-2--clone-and-configure)) — `ibcf` is not required for the VoNR call path shown in the [Architecture](#architecture) diagram.
+
+---
+
+### Bug 11 — pyHSS Crashes Generating SAA When `ifc_path` Is NULL
+
+**Symptom:** SIP REGISTER gets stuck retrying 401 challenges forever; S-CSCF logs show `Transaction timeout - did not get SAA`; pyHSS logs show:
+```
+[ERROR] [diameter.py] [generateDiameterResponse] [SAR] Error generating response:
+AttributeError: 'NoneType' object has no attribute 'split'
+```
+
+**Root cause:** pyHSS renders the initial-filter-criteria XML via Jinja2 using `ims_subscriber.ifc_path`. If that column is NULL (as it is after inserting subscribers with the minimal columns shown in older versions of this README), Jinja2's template loader crashes trying to `.split("/")` on `None`, and the Server-Assignment-Answer is never sent — so S-CSCF can never complete registration.
+
+**Fix:** Always set `ifc_path` and `sh_template_path` when provisioning a subscriber:
+```sql
+UPDATE ims_subscriber SET ifc_path='default_ifc.xml', sh_template_path='default_sh_user_data.xml';
+```
+Both files ship inside the `pyhss` container at `/pyhss/default_ifc.xml` and `/pyhss/default_sh_user_data.xml`. See the corrected SQL in [Subscriber Configuration](#subscriber-configuration).
+
+---
+
+### Bug 12 — I-CSCF/S-CSCF Route-Add Fails Silently (No `NET_ADMIN`)
+
+**Symptom:** `start_vonr.sh`'s Step 8 (`docker exec icscf ip route add ...`, `docker exec scscf ip route add ...`) fails with `Operation not permitted`, silenced by the script's `2>/dev/null`. `verify_vonr_complete.sh` reports `[FAIL] I-CSCF — no route to UE subnet` / `S-CSCF — no route to UE subnet`.
+
+**Root cause:** Only `pcscf` has `cap_add: NET_ADMIN` / `privileged: true` in `docker_open5gs`'s compose files by default. In practice **P-CSCF is the only element that needs the direct route** (it is the sole UE-facing proxy — I-CSCF/S-CSCF only talk to pyHSS via Diameter and to P-CSCF), so this doesn't block calls. To get a clean 55/55 on the verification script anyway, add the capability and recreate:
+
+```bash
+# In sa-vonr-deploy.yaml, under both `icscf:` and `scscf:` service blocks, add:
+#   cap_add:
+#     - NET_ADMIN
+
+cd ~/docker_open5gs
+docker compose -f sa-vonr-deploy.yaml up -d icscf scscf   # recreates with the new capability
+docker exec icscf ip route add 192.168.101.0/24 via 172.22.0.8
+docker exec scscf ip route add 192.168.101.0/24 via 172.22.0.8
+```
+
+---
+
+### Bug 13 — UE Hangs Forever at "Attaching UE..." After a Lone Restart
+
+**Symptom:** After `docker restart srsue_5g_zmq` (or recreating only the UE container), the UE log stops at `Attaching UE...` indefinitely — no Random Access attempt, no error, `/mnt/srslte/ue.log` stays empty. `docker restart srsgnb_zmq` alone shows the same symptom in reverse.
+
+**Root cause:** The ZMQ RF link between gNB and UE is a pair of persistent TCP sockets (`tx_port`/`rx_port` in `ue_5g_zmq.conf` / `gnb_zmq.conf`). Restarting only one side of the pair leaves the ZMQ transport in a stale state that srsRAN doesn't recover from on its own — no PRACH is ever transmitted.
+
+**Fix:** Always recreate the gNB and UE together, gNB first:
+```bash
+cd ~/docker_open5gs
+docker compose -f srsue_5g_zmq.yaml down
+docker compose -f srsgnb_zmq.yaml down
+docker compose -f srsgnb_zmq.yaml up -d
+sleep 15
+docker compose -f srsue_5g_zmq.yaml up -d
+```
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -487,6 +624,13 @@ This is exactly what `vonr_full_kpi_logs.sh` does — it captures on `-i any` in
 | linphonec ignores config | Wrong HOME directory | Use `export HOME=/root/ue1` before running linphonec |
 | tcpdump captures 0 packets | Wrong interface | Use `-i any` not `-i eth0` inside container |
 | Call setup > 16 seconds | ICE/STUN negotiation | Expected in linphonec — disable ICE in linphonerc for faster setup |
+| `ibcf` build fails, 403 from etsi.org | External EVS codec download blocked | Use `sa-vonr-deploy.yaml` (skip `ibcf`) — see [Bug 10](#bug-10--ibcf-build-fails-on-external-etsi-download-403-forbidden) |
+| `docker compose up` says `pull access denied` | Images aren't on Docker Hub | Pull from GHCR + `docker tag` locally — see [Step 2](#step-2--clone-and-configure) |
+| REGISTER loops on 401 forever, never 200 OK | pyHSS `ifc_path` NULL, SAA never sent | `UPDATE ims_subscriber SET ifc_path=..., sh_template_path=...` — see [Bug 11](#bug-11--pyhss-crashes-generating-saa-when-ifc_path-is-null) |
+| PDU session rejected: "DNN not supported in slice" | `ims` APN slice missing `sst` | Set `slice.$.sst` to match the default slice (usually `1`) — see [Subscriber Configuration](#subscriber-configuration) |
+| UE stuck at `Attaching UE...` forever, no logs | gNB/UE ZMQ link went stale from a lone restart | Recreate gNB + UE together — see [Bug 13](#bug-13--ue-hangs-forever-at-attaching-ue-after-a-lone-restart) |
+| `verify_vonr_complete.sh`: I-CSCF/S-CSCF no route | Only P-CSCF has `NET_ADMIN` by default | Harmless for calls; add `NET_ADMIN` to fix the check — see [Bug 12](#bug-12--i-cscfs-cscf-route-add-fails-silently-no-net_admin) |
+| WebUI login returns `403 CSRF token missing` | `curl`/API login without a CSRF token | Provision subscribers via `open5gs-dbctl` instead (see [Subscriber Configuration](#subscriber-configuration)), or use a real browser for the WebUI |
 
 ---
 
@@ -504,7 +648,47 @@ This is exactly what `vonr_full_kpi_logs.sh` does — it captures on `-i any` in
 
 ## Subscriber Configuration
 
-### Open5GS 5G Core — via WebUI at `http://localhost:9999` (admin / 1423)
+> **This entire section is a required manual step** — `start_vonr.sh` does
+> not provision any subscribers. Do this once, before the first
+> `~/start_vonr.sh` run (or before starting the UE, if the core is already up).
+
+### Open5GS 5G Core — via `open5gs-dbctl`, not the WebUI
+
+The WebUI at `http://localhost:9999` (admin / 1423) looks like the obvious way
+to do this, but its `/api/login` endpoint enforces CSRF checks that a plain
+`curl` script can't satisfy — you'd need a real browser. It's simpler and
+scriptable to use `open5gs-dbctl`, which ships inside the `webui` container
+and talks to the same Mongo database:
+
+```bash
+# Base subscriber with the "internet" APN
+docker exec webui /open5gs/misc/db/open5gs-dbctl --db_uri=mongodb://mongo/open5gs \
+  add 001011234567895 8baf473f2f8fd09487cccbd7097c6862 8E27B6AF0E692E750F32667A3B14605D
+
+# Add the "ims" APN as a second network slice
+docker exec webui /open5gs/misc/db/open5gs-dbctl --db_uri=mongodb://mongo/open5gs \
+  update_apn 001011234567895 ims 1
+```
+
+> **Critical, undocumented gap:** `update_apn` creates the second slice
+> **without an `sst` (slice type) field**. The UE's PDU Session Establishment
+> Request always carries the default S-NSSAI, and if the `ims` slice's `sst`
+> doesn't match, SMF rejects it with `Ue requested DNN "ims" Not Supported OR
+> Not Subscribed in the Slice` — the call never gets an IP. Fix it directly
+> in Mongo, matching the `sst` your first (`internet`) slice already has
+> (check with `showpretty` below — it's `1` unless you changed it):
+> ```bash
+> docker exec mongo mongosh --quiet open5gs --eval '
+> db.subscribers.updateOne(
+>   {imsi: "001011234567895", "slice.session.name": "ims"},
+>   {$set: {"slice.$.sst": 1}}
+> )'
+> ```
+
+Verify both slices look right (`sst` present on both, `ims` APN present):
+```bash
+docker exec webui /open5gs/misc/db/open5gs-dbctl --db_uri=mongodb://mongo/open5gs showpretty
+```
 
 | Field | Value |
 |-------|-------|
@@ -512,42 +696,71 @@ This is exactly what `vonr_full_kpi_logs.sh` does — it captures on `-i any` in
 | Key (Ki) | `8baf473f2f8fd09487cccbd7097c6862` |
 | OPC | `8E27B6AF0E692E750F32667A3B14605D` |
 | AMF | `8000` |
-| APN 1 | `internet` — QCI 9, ARP 8 |
-| APN 2 | `ims` — QCI 5, ARP 1 + PCC rule QCI 1 GBR 128/128 kbps |
+| APN 1 | `internet` — slice `sst=1` (default) |
+| APN 2 | `ims` — same slice `sst=1`, added via `update_apn` + the Mongo fix above |
 
 ### IMS pyHSS — via MySQL direct insert
 
-> **Important:** The `imsi` column must be set to the **MSISDN value** (not the real IMSI) due to the pyHSS bug described in Bug 1.
+> **Important #1:** The `imsi` column must be set to the **MSISDN value** (not the real IMSI) due to the pyHSS bug described in Bug 1.
+>
+> **Important #2:** The column names below (`auc_id`, `subscriber_id`,
+> `ims_subscriber_id`, `apn_ambr_dl/ul`, `amf`) match the pyHSS schema as
+> shipped in the `ghcr.io/herlesupreeth/docker_pyhss:master` image. An
+> earlier version of this README used a plain `id` column and omitted
+> `apn_ambr_dl/ul` and `amf` — those don't exist in this schema and the
+> inserts fail with `Unknown column 'id' in 'field list'`. Check your own
+> image with `DESCRIBE auc; DESCRIBE subscriber; DESCRIBE ims_subscriber;`
+> if these don't match.
+>
+> **Important #3:** `ifc_path` and `sh_template_path` on `ims_subscriber`
+> are **not optional** — see [Bug 11](#bug-11--pyhss-crashes-generating-saa-when-ifc_path-is-null).
+> Without them, REGISTER loops on 401 forever and never reaches 200 OK.
 
 ```sql
 -- Connect: docker exec -it mysql mysql -u root -pchangeme ims_hss_db
+-- (use `docker exec -i` — not just `-it` — if piping this via a heredoc/script,
+--  or the SQL never reaches the container's stdin and nothing happens)
 
--- APN entries
-INSERT INTO apn (apn_id, apn) VALUES (1, 'internet'), (3, 'ims');
+-- APN entries (apn_ambr_dl/apn_ambr_ul are NOT NULL in this schema)
+INSERT INTO apn (apn_id, apn, apn_ambr_dl, apn_ambr_ul) VALUES (1, 'internet', 1000000000, 1000000000);
+INSERT INTO apn (apn_id, apn, apn_ambr_dl, apn_ambr_ul) VALUES (3, 'ims', 1000000000, 1000000000);
 
--- Authentication credentials (imsi = MSISDN intentionally)
-INSERT INTO auc (id, imsi, ki, opc, sqn, auth_scheme)
+-- Authentication credentials (imsi = MSISDN intentionally, see Bug 1)
+INSERT INTO auc (auc_id, imsi, ki, opc, amf, sqn)
 VALUES (1, '9076543210', '8baf473f2f8fd09487cccbd7097c6862',
-        '8E27B6AF0E692E750F32667A3B14605D', 0, 'milenage');
+        '8E27B6AF0E692E750F32667A3B14605D', '8000', 0);
 
 -- Subscriber (imsi = MSISDN intentionally, apn_list = '1,3')
-INSERT INTO subscriber (id, imsi, msisdn, auc_id, default_apn, apn_list)
-VALUES (1, '9076543210', '9076543210', 1, 1, '1,3');
+INSERT INTO subscriber (subscriber_id, imsi, msisdn, enabled, auc_id, default_apn, apn_list)
+VALUES (1, '9076543210', '9076543210', 1, 1, 1, '1,3');
 
--- IMS subscriber with S-CSCF address
-INSERT INTO ims_subscriber (id, imsi, msisdn, scscf)
+-- IMS subscriber with S-CSCF address + IFC/Sh templates (see Bug 11)
+INSERT INTO ims_subscriber (ims_subscriber_id, imsi, msisdn, scscf, ifc_path, sh_template_path)
 VALUES (1, '9076543210', '9076543210',
-        'sip:scscf.ims.mnc001.mcc001.3gppnetwork.org:6060');
+        'sip:scscf.ims.mnc001.mcc001.3gppnetwork.org:6060',
+        'default_ifc.xml', 'default_sh_user_data.xml');
 
 -- Second subscriber (UE2)
-INSERT INTO auc (id, imsi, ki, opc, sqn, auth_scheme)
+INSERT INTO auc (auc_id, imsi, ki, opc, amf, sqn)
 VALUES (2, '9076543211', '8baf473f2f8fd09487cccbd7097c6862',
-        '8E27B6AF0E692E750F32667A3B14605D', 0, 'milenage');
-INSERT INTO subscriber (id, imsi, msisdn, auc_id, default_apn, apn_list)
-VALUES (2, '9076543211', '9076543211', 2, 1, '1,3');
-INSERT INTO ims_subscriber (id, imsi, msisdn, scscf)
+        '8E27B6AF0E692E750F32667A3B14605D', '8000', 0);
+INSERT INTO subscriber (subscriber_id, imsi, msisdn, enabled, auc_id, default_apn, apn_list)
+VALUES (2, '9076543211', '9076543211', 1, 2, 1, '1,3');
+INSERT INTO ims_subscriber (ims_subscriber_id, imsi, msisdn, scscf, ifc_path, sh_template_path)
 VALUES (2, '9076543211', '9076543211',
-        'sip:scscf.ims.mnc001.mcc001.3gppnetwork.org:6060');
+        'sip:scscf.ims.mnc001.mcc001.3gppnetwork.org:6060',
+        'default_ifc.xml', 'default_sh_user_data.xml');
+```
+
+`default_ifc.xml` and `default_sh_user_data.xml` ship inside the `pyhss`
+container at `/pyhss/`. After inserting, restart pyHSS so the Diameter
+service picks up a clean state and reapply the operation_log fix (Bug 4):
+
+```bash
+docker restart pyhss
+sleep 15   # Diameter needs ~15s to start listening again, see Bug 5
+docker exec mysql mysql -u root -pchangeme ims_hss_db \
+  -e "ALTER TABLE operation_log MODIFY item_id INTEGER NULL;"
 ```
 
 ---
